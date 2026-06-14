@@ -47,6 +47,10 @@ case "$TARGET_OS/$TARGET_ARCH" in
 	windows/amd64)
 		HOST="${HOST:-x86_64-w64-mingw32}"
 		FFMPEG_TARGET_ARGS=(--target-os=mingw32 --arch=x86_64 --cross-prefix="$HOST-" --enable-cross-compile)
+		export AR="${AR:-$HOST-ar}"
+		export RANLIB="${RANLIB:-$HOST-ranlib}"
+		export NM="${NM:-$HOST-nm}"
+		export STRIP="${STRIP:-$HOST-strip}"
 		;;
 	linux/*|darwin/*)
 		HOST="${HOST:-}"
@@ -102,16 +106,20 @@ build_autotools() {
 			autoreconf -fiv
 		fi
 	fi
-	local host_args=()
 	if [ -n "$HOST" ]; then
-		host_args=(--host="$HOST")
+		./configure \
+			--host="$HOST" \
+			--prefix="$PREFIX" \
+			--disable-shared \
+			--enable-static \
+			"$@"
+	else
+		./configure \
+			--prefix="$PREFIX" \
+			--disable-shared \
+			--enable-static \
+			"$@"
 	fi
-	./configure \
-		"${host_args[@]}" \
-		--prefix="$PREFIX" \
-		--disable-shared \
-		--enable-static \
-		"$@"
 	make -j"$JOBS"
 	make install
 }
