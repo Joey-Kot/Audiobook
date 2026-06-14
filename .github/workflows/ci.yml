@@ -1,12 +1,21 @@
-name: CI
+name: CI/CD
 
 on:
   push:
     branches:
       - main
       - dev
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: latest-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   core:
@@ -44,17 +53,29 @@ jobs:
           grep -qi 'FFmpeg' THIRD_PARTY_NOTICES.txt
           grep -qi 'libmp3lame\|LAME' THIRD_PARTY_NOTICES.txt
 
-  gui:
-    name: GUI Build (${{ matrix.os }})
+  package:
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     needs: core
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - macos-latest
-          - ubuntu-22.04
+        include:
+          - name: windows-amd64
+            os: windows-latest
+            platform: windows/amd64
+            gui_binary: Audiobook-Studio.exe
+            archive: Audiobook-Studio-windows-amd64.zip
+          - name: darwin-arm64
+            os: macos-latest
+            platform: darwin/arm64
+            gui_binary: Audiobook-Studio.app
+            archive: Audiobook-Studio-darwin-arm64.zip
+          - name: linux-amd64
+            os: ubuntu-22.04
+            platform: linux/amd64
+            gui_binary: Audiobook-Studio
+            archive: Audiobook-Studio-linux-amd64.tar.gz
 
     steps:
       - name: Checkout
@@ -164,7 +185,7 @@ jobs:
           case "${selected_ffmpeg_files}" in
             *convert_exec.go*) echo "GUI build selected external-process FFmpeg implementation" >&2; exit 1 ;;
           esac
-          wails build -clean -tags gui_ffmpeg_cgo
+          wails build -clean -platform ${{ matrix.platform }} -tags gui_ffmpeg_cgo
 
       - name: Build Windows GUI with FFmpeg CGO
         if: runner.os == 'Windows'
@@ -188,4 +209,77 @@ jobs:
           case "${selected_ffmpeg_files}" in
             *convert_exec.go*) echo "GUI build selected external-process FFmpeg implementation" >&2; exit 1 ;;
           esac
-          wails build -clean -tags gui_ffmpeg_cgo
+          wails build -clean -platform ${{ matrix.platform }} -tags gui_ffmpeg_cgo
+
+      - name: Package zip
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/package
+          cp -R "GUI/build/bin/${{ matrix.gui_binary }}" dist/package/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.txt dist/package/
+          cd dist/package
+          python3 -m zipfile -c "../${{ matrix.archive }}" *
+
+      - name: Package tar
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/package
+          cp "GUI/build/bin/${{ matrix.gui_binary }}" dist/package/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.txt dist/package/
+          tar -C dist/package -czf "dist/${{ matrix.archive }}" .
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.archive }}.sha256
+
+  publish:
+    name: Publish Latest Release
+    runs-on: ubuntu-latest
+    needs: package
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Move Latest tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f Latest "$GITHUB_SHA"
+          git push origin refs/tags/Latest --force
+
+      - name: Publish Latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Automated Audiobook-Studio build from ${GITHUB_REF_NAME} at ${GITHUB_SHA}."
+          if gh release view Latest >/dev/null 2>&1; then
+            gh release edit Latest --title "Latest" --notes "$notes"
+          else
+            gh release create Latest --title "Latest" --notes "$notes"
+          fi
+          gh release upload Latest dist/* --clobber
