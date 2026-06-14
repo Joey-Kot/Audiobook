@@ -31,6 +31,19 @@ jobs:
       - name: Test core
         run: go test ./...
 
+      - name: Check FFmpeg nonfree is disabled
+        run: |
+          if grep -R -n -- '--enable-nonfree' scripts; then
+            echo "FFmpeg nonfree components must not be enabled." >&2
+            exit 1
+          fi
+
+      - name: Check third-party notices
+        run: |
+          test -s THIRD_PARTY_NOTICES.txt
+          grep -qi 'FFmpeg' THIRD_PARTY_NOTICES.txt
+          grep -qi 'libmp3lame\|LAME' THIRD_PARTY_NOTICES.txt
+
   gui:
     name: GUI Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

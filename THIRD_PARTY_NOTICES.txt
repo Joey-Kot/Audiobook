@@ -1,0 +1,76 @@
+Third Party Notices
+
+Audiobook-Studio uses the following third-party components:
+
+1. FFmpeg/libav
+
+Used by the GUI version for audio decoding, resampling, MP3 encoding, and muxing.
+The CLI/default development path may also call a system-installed ffmpeg executable.
+
+FFmpeg is a multimedia framework developed by the FFmpeg project.
+FFmpeg is licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later,
+or the GNU General Public License (GPL) version 2 or later, depending on the build configuration.
+
+This project builds and statically links a trimmed FFmpeg/libav configuration for GUI builds
+on Windows, macOS, and Linux. The trimmed configuration is used only for audiobook audio
+processing and currently enables decoding for common TTS outputs, resampling, and MP3 output.
+
+No FFmpeg nonfree components are intentionally enabled.
+
+FFmpeg project:
+https://ffmpeg.org/
+
+FFmpeg legal information:
+https://ffmpeg.org/legal.html
+
+FFmpeg source code:
+https://ffmpeg.org/download.html
+
+2. LAME / libmp3lame
+
+Used by the GUI version through FFmpeg for MP3 encoding.
+
+LAME is licensed under the GNU Lesser General Public License (LGPL).
+
+LAME project:
+https://lame.sourceforge.io/
+
+LAME source code:
+https://sourceforge.net/projects/lame/files/lame/
+
+3. Wails
+
+Used by the GUI version to provide the desktop application shell and Go-to-frontend bindings.
+
+Wails v2 is licensed under the MIT License.
+
+Wails project:
+https://wails.io/
+
+Wails source code:
+https://github.com/wailsapp/wails
+
+4. Go
+
+Used to build Audiobook-Studio.
+
+Go is distributed under a BSD-style license.
+
+Go project:
+https://go.dev/
+
+Go source code:
+https://go.dev/doc/go1.22
+
+5. Node.js and npm
+
+Used by the GUI frontend build process.
+
+Node.js is licensed under the MIT License.
+npm is licensed under the Artistic License 2.0.
+
+Node.js project:
+https://nodejs.org/
+
+npm project:
+https://www.npmjs.com/

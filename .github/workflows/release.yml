@@ -104,6 +104,21 @@ jobs:
           sudo apt-get install -y ffmpeg
           go test ./...
 
+      - name: Check FFmpeg nonfree is disabled
+        if: runner.os == 'Linux'
+        run: |
+          if grep -R -n -- '--enable-nonfree' scripts; then
+            echo "FFmpeg nonfree components must not be enabled." >&2
+            exit 1
+          fi
+
+      - name: Check third-party notices
+        if: runner.os == 'Linux'
+        run: |
+          test -s THIRD_PARTY_NOTICES.txt
+          grep -qi 'FFmpeg' THIRD_PARTY_NOTICES.txt
+          grep -qi 'libmp3lame\|LAME' THIRD_PARTY_NOTICES.txt
+
       - name: Build frontend
         working-directory: GUI
         run: npm --prefix frontend run build
@@ -180,7 +195,7 @@ jobs:
         run: |
           mkdir -p dist/package
           cp -R "GUI/build/bin/${{ matrix.gui_binary }}" dist/package/
-          cp README.md LICENSE dist/package/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.txt dist/package/
           cd dist/package
           python3 -m zipfile -c "../${{ matrix.archive }}" *
 
@@ -189,7 +204,7 @@ jobs:
         run: |
           mkdir -p dist/package
           cp "GUI/build/bin/${{ matrix.gui_binary }}" dist/package/
-          cp README.md LICENSE dist/package/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.txt dist/package/
           tar -C dist/package -czf "dist/${{ matrix.archive }}" .
 
       - name: Checksum

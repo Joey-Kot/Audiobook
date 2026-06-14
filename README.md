@@ -61,6 +61,8 @@ GUI builds use a trimmed static FFmpeg/libmp3lame CGO build produced by `scripts
 
 The static FFmpeg configuration decodes common TTS outputs including WAV, MP3, Opus/Ogg, AAC/M4A, and raw PCM. The audiobook output encoder is intentionally fixed to MP3 for now.
 
+Third-party dependency and license notes are tracked in `THIRD_PARTY_NOTICES.txt`. Release packages include `README.md`, `LICENSE`, and `THIRD_PARTY_NOTICES.txt`.
+
 The application icons live under `GUI/build/`:
 
 - `GUI/build/appicon.png`

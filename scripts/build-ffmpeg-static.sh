@@ -43,10 +43,31 @@ PREFIX="${PREFIX:-$ROOT_DIR/build/ffmpeg-$TARGET_OS-$TARGET_ARCH}"
 LAME_VERSION="${LAME_VERSION:-3.100}"
 FFMPEG_REF="${FFMPEG_REF:-n7.1.1}"
 
+ensure_tool_alias() {
+	local prefixed="$1"
+	local fallback="$2"
+	local shim_dir="$BUILD_DIR/toolchain-bin"
+	if command -v "$prefixed" >/dev/null 2>&1; then
+		return
+	fi
+	local fallback_path
+	fallback_path="$(command -v "$fallback" || true)"
+	if [ -z "$fallback_path" ]; then
+		echo "Required tool not found: $prefixed or $fallback" >&2
+		exit 1
+	fi
+	mkdir -p "$shim_dir"
+	ln -sf "$fallback_path" "$shim_dir/$prefixed"
+	export PATH="$shim_dir:$PATH"
+}
+
 case "$TARGET_OS/$TARGET_ARCH" in
 	windows/amd64)
 		HOST="${HOST:-x86_64-w64-mingw32}"
-		FFMPEG_TARGET_ARGS=(--target-os=mingw32 --arch=x86_64 --cross-prefix="$HOST-" --enable-cross-compile)
+		ensure_tool_alias "$HOST-ar" ar
+		ensure_tool_alias "$HOST-ranlib" ranlib
+		ensure_tool_alias "$HOST-nm" nm
+		ensure_tool_alias "$HOST-strip" strip
 		export AR="${AR:-$HOST-ar}"
 		export RANLIB="${RANLIB:-$HOST-ranlib}"
 		export NM="${NM:-$HOST-nm}"
@@ -54,7 +75,6 @@ case "$TARGET_OS/$TARGET_ARCH" in
 		;;
 	linux/*|darwin/*)
 		HOST="${HOST:-}"
-		FFMPEG_TARGET_ARGS=()
 		;;
 	*)
 		echo "Unsupported target: $TARGET_OS/$TARGET_ARCH" >&2
@@ -133,31 +153,42 @@ build_autotools "$BUILD_DIR/lame-$LAME_VERSION" --disable-frontend --disable-dec
 clone_once "https://github.com/FFmpeg/FFmpeg.git" "$FFMPEG_REF" "$BUILD_DIR/ffmpeg"
 cd "$BUILD_DIR/ffmpeg"
 
-./configure \
-	--prefix="$PREFIX" \
-	"${FFMPEG_TARGET_ARGS[@]}" \
-	--pkg-config=pkg-config \
-	--pkg-config-flags=--static \
-	--disable-shared \
-	--enable-static \
-	--disable-debug \
-	--disable-doc \
-	--disable-programs \
-	--disable-autodetect \
-	--disable-everything \
-	--enable-gpl \
-	--enable-version3 \
-	--enable-avcodec \
-	--enable-avformat \
-	--enable-avutil \
-	--enable-swresample \
-	--enable-protocol=file \
-	--enable-parser=aac,mpegaudio,opus \
-	--enable-demuxer=aac,mp3,mov,ogg,wav,s16le,s24le,s32le,f32le \
-	--enable-decoder=aac,aac_fixed,mp3,mp3float,opus,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_s16be,pcm_s16le,pcm_s24be,pcm_s24le,pcm_s32be,pcm_s32le,pcm_s64be,pcm_s64le,pcm_s8 \
-	--enable-encoder=libmp3lame \
-	--enable-muxer=mp3 \
+configure_ffmpeg_common_args=(
+	--prefix="$PREFIX"
+	--pkg-config=pkg-config
+	--pkg-config-flags=--static
+	--disable-shared
+	--enable-static
+	--disable-debug
+	--disable-doc
+	--disable-programs
+	--disable-autodetect
+	--disable-everything
+	--enable-gpl
+	--enable-version3
+	--enable-avcodec
+	--enable-avformat
+	--enable-avutil
+	--enable-swresample
+	--enable-protocol=file
+	--enable-parser=aac,mpegaudio,opus
+	--enable-demuxer=aac,mp3,mov,ogg,wav,s16le,s24le,s32le,f32le
+	--enable-decoder=aac,aac_fixed,mp3,mp3float,opus,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_s16be,pcm_s16le,pcm_s24be,pcm_s24le,pcm_s32be,pcm_s32le,pcm_s64be,pcm_s64le,pcm_s8
+	--enable-encoder=libmp3lame
+	--enable-muxer=mp3
 	--enable-libmp3lame
+)
+
+if [ "$TARGET_OS" = "windows" ]; then
+	./configure \
+		--target-os=mingw32 \
+		--arch=x86_64 \
+		--cross-prefix="$HOST-" \
+		--enable-cross-compile \
+		"${configure_ffmpeg_common_args[@]}"
+else
+	./configure "${configure_ffmpeg_common_args[@]}"
+fi
 
 make -j"$JOBS"
 make install
