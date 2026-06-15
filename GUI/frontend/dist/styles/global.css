@@ -31,7 +31,7 @@ textarea {
 }
 
 .topbar {
-  margin: 16px;
+  margin: 16px 28px;
   display: flex;
   align-items: end;
   justify-content: space-between;
@@ -475,7 +475,7 @@ label {
   .topbar {
     display: grid;
     align-items: start;
-    margin: 10px;
+    margin: 10px 14px;
   }
 
   .topActions {
