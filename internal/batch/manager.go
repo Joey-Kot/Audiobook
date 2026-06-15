@@ -399,6 +399,9 @@ func (m *Manager) emit(progress BatchProgress) {
 func DiscoverTextFiles(paths []string) ([]string, error) {
 	var files []string
 	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			return nil, fmt.Errorf("input path is empty")
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			return nil, err

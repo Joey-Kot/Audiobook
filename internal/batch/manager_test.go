@@ -185,6 +185,35 @@ func TestManagerCancelFileDoesNotCancelBatch(t *testing.T) {
 	}
 }
 
+func TestDiscoverTextFilesRejectsEmptyPath(t *testing.T) {
+	if _, err := DiscoverTextFiles([]string{""}); err == nil {
+		t.Fatal("expected empty path error")
+	}
+}
+
+func TestDiscoverTextFilesFindsTxtFiles(t *testing.T) {
+	dir := t.TempDir()
+	first := fileWithText(t, dir, "first.txt", "first")
+	second := fileWithText(t, dir, "second.TXT", "second")
+	if err := os.WriteFile(filepath.Join(dir, "ignored.md"), []byte("ignored"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := DiscoverTextFiles([]string{dir})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	want := []string{first, second}
+	if len(files) != len(want) {
+		t.Fatalf("expected %d files, got %d: %#v", len(want), len(files), files)
+	}
+	for i := range want {
+		if files[i] != want[i] {
+			t.Fatalf("file %d: want %q, got %q", i, want[i], files[i])
+		}
+	}
+}
+
 func fileWithText(t *testing.T, dir string, name string, text string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

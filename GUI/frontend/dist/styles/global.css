@@ -142,7 +142,8 @@ button.danger {
   overflow: hidden;
 }
 
-.dropzone.dragging {
+.dropzone.dragging,
+.dropzone.wails-drop-target-active {
   border-color: #0ea5e9;
   background: rgba(224, 242, 254, 0.9);
 }
