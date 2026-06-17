@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -59,8 +60,8 @@ type Synthesizer interface {
 
 // AudioEncoder is the ffmpeg dependency used by Manager.
 type AudioEncoder interface {
-	DecodeToPCM(input []byte) ([]byte, int, error)
-	MergeToMP3(segments [][]byte, outputPath string) error
+	DecodeToPCMFile(input []byte, outputPath string) (int, error)
+	MergePCMFilesToMP3(segmentPaths []string, outputPath string) error
 }
 
 // FileTask is one stable-index file conversion request.
@@ -265,20 +266,28 @@ func (m *Manager) Resume() {
 }
 
 func (m *Manager) processFile(ctx context.Context, fileIndex int, path string, outputDir string, outputName string, ttsSlots chan struct{}) error {
+	defer debug.FreeOSMemory()
 	name := filepath.Base(path)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	text := strings.TrimSpace(string(raw))
+	raw = nil
 	charCount := utf8.RuneCountInString(text)
 	m.emit(BatchProgress{FileIndex: fileIndex, FileName: name, CharCount: charCount, Percent: 1, Status: StatusSplitting})
 	parts := splitter.Split(text, m.cfg.SplitThreshold)
+	text = ""
 	if len(parts) == 0 {
 		return fmt.Errorf("%s has no text", name)
 	}
 
-	encoded := make([][]byte, len(parts))
+	pcmDir, err := os.MkdirTemp("", "audiobook-studio-pcm-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(pcmDir)
+	segmentPaths := make([]string, len(parts))
 	m.emit(BatchProgress{FileIndex: fileIndex, FileName: name, CharCount: charCount, Percent: 5, Status: StatusTTS, Message: fmt.Sprintf("%d chunks", len(parts))})
 
 	concurrency := m.cfg.Concurrency
@@ -323,7 +332,9 @@ func (m *Manager) processFile(ctx context.Context, fileIndex int, path string, o
 					}
 					return
 				}
-				pcm, _, err := m.encoder.DecodeToPCM(audio)
+				pcmPath := filepath.Join(pcmDir, fmt.Sprintf("%06d.pcm", j.index))
+				_, err = m.encoder.DecodeToPCMFile(audio, pcmPath)
+				audio = nil
 				if err != nil {
 					select {
 					case errCh <- fmt.Errorf("chunk %d decode: %w", j.index+1, err):
@@ -331,7 +342,7 @@ func (m *Manager) processFile(ctx context.Context, fileIndex int, path string, o
 					}
 					return
 				}
-				encoded[j.index] = pcm
+				segmentPaths[j.index] = pcmPath
 				done := int(completed.Add(1))
 				percent := 5 + int(float64(done)/float64(len(parts))*80)
 				m.emit(BatchProgress{FileIndex: fileIndex, FileName: name, CharCount: charCount, Percent: percent, Status: StatusTTS, Message: fmt.Sprintf("%d/%d chunks", done, len(parts))})
@@ -366,11 +377,13 @@ sendLoop:
 	if outputName != "" {
 		baseName = strings.TrimSuffix(filepath.Base(outputName), filepath.Ext(outputName))
 	}
+	parts = nil
 	outputPath := filepath.Join(outputDir, baseName+".mp3")
 	m.emit(BatchProgress{FileIndex: fileIndex, FileName: name, CharCount: charCount, Percent: 90, Status: StatusMerging})
-	if err := m.encoder.MergeToMP3(encoded, outputPath); err != nil {
+	if err := m.encoder.MergePCMFilesToMP3(segmentPaths, outputPath); err != nil {
 		return err
 	}
+	segmentPaths = nil
 	m.emit(BatchProgress{FileIndex: fileIndex, FileName: name, CharCount: charCount, Percent: 100, Status: StatusDone, Output: outputPath})
 	return nil
 }

@@ -4,14 +4,14 @@ Audiobook-Studio uses the following third-party components:
 
 1. FFmpeg/libav
 
-Used by the GUI version for audio decoding, resampling, MP3 encoding, and muxing.
-The CLI/default development path may also call a system-installed ffmpeg executable.
+Used by the application for audio decoding, resampling, MP3 encoding, and muxing.
+Local fallback builds may also call a system-installed ffmpeg executable.
 
 FFmpeg is a multimedia framework developed by the FFmpeg project.
 FFmpeg is licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later,
 or the GNU General Public License (GPL) version 2 or later, depending on the build configuration.
 
-This project builds and statically links a trimmed FFmpeg/libav configuration for GUI builds
+This project builds and statically links a trimmed FFmpeg/libav configuration for release builds
 on Windows, macOS, and Linux. The trimmed configuration is used only for audiobook audio
 processing and currently enables decoding for common TTS outputs, resampling, and MP3 output.
 
@@ -28,7 +28,7 @@ https://ffmpeg.org/download.html
 
 2. LAME / libmp3lame
 
-Used by the GUI version through FFmpeg for MP3 encoding.
+Used by the application through FFmpeg for MP3 encoding.
 
 LAME is licensed under the GNU Lesser General Public License (LGPL).
 
@@ -40,7 +40,7 @@ https://sourceforge.net/projects/lame/files/lame/
 
 3. Wails
 
-Used by the GUI version to provide the desktop application shell and Go-to-frontend bindings.
+Used to provide the desktop application shell and Go-to-frontend bindings.
 
 Wails v2 is licensed under the MIT License.
 

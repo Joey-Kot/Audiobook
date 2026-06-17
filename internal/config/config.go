@@ -21,7 +21,7 @@ import (
 	"audiobook-studio/internal/splitter"
 )
 
-// Config holds all user-editable settings for CLI and GUI workflows.
+// Config holds all user-editable settings.
 type Config struct {
 	APIBaseURL      string `json:"API_BASE_URL"`
 	APIToken        string `json:"API_TOKEN"`
@@ -85,11 +85,6 @@ func Save(path string, cfg Config) error {
 		}
 	}
 	return os.WriteFile(path, data, 0600)
-}
-
-// SaveDefault writes the default config to path.
-func SaveDefault(path string) error {
-	return Save(path, DefaultConfig())
 }
 
 // Validate checks the user-editable settings.

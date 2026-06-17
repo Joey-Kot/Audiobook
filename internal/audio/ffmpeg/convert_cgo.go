@@ -16,6 +16,7 @@ package ffmpeg
 /*
 #cgo pkg-config: libavformat libavcodec libavutil libswresample
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,6 +159,133 @@ cleanup:
 	if (ret < 0 && *out != NULL) {
 		av_freep(out);
 		*out_len = 0;
+	}
+	swr_free(&swr);
+	av_frame_free(&frame);
+	av_packet_free(&pkt);
+	avcodec_free_context(&dec);
+	avformat_close_input(&fmt);
+	av_channel_layout_uninit(&mono);
+	return ret;
+}
+
+static int audiobook_write_pcm(FILE *out_file, const uint8_t *data, int data_len, char *errbuf, int errbuf_size) {
+	if (data_len <= 0) {
+		return 0;
+	}
+	if (fwrite(data, 1, data_len, out_file) != (size_t)data_len) {
+		audiobook_set_error(errbuf, errbuf_size, "write pcm output");
+		return AVERROR(EIO);
+	}
+	return 0;
+}
+
+static int audiobook_decode_file_to_pcm_file(const char *in_path, const char *out_path, int target_rate, char *errbuf, int errbuf_size) {
+	AVFormatContext *fmt = NULL;
+	AVCodecContext *dec = NULL;
+	AVPacket *pkt = NULL;
+	AVFrame *frame = NULL;
+	SwrContext *swr = NULL;
+	FILE *out_file = NULL;
+	int audio_stream = -1;
+	int ret = 0;
+	AVChannelLayout mono;
+	av_channel_layout_default(&mono, 1);
+
+	av_log_set_level(AV_LOG_ERROR);
+
+	out_file = fopen(out_path, "wb");
+	if (out_file == NULL) { ret = AVERROR(EIO); audiobook_set_error(errbuf, errbuf_size, "open pcm output"); goto cleanup; }
+
+	ret = avformat_open_input(&fmt, in_path, NULL, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "open input", ret); goto cleanup; }
+	ret = avformat_find_stream_info(fmt, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "read stream info", ret); goto cleanup; }
+	audio_stream = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+	if (audio_stream < 0) { ret = audio_stream; audiobook_set_av_error(errbuf, errbuf_size, "find audio stream", ret); goto cleanup; }
+
+	const AVCodec *decoder = avcodec_find_decoder(fmt->streams[audio_stream]->codecpar->codec_id);
+	if (decoder == NULL) { ret = AVERROR_DECODER_NOT_FOUND; audiobook_set_error(errbuf, errbuf_size, "decoder not found"); goto cleanup; }
+	dec = avcodec_alloc_context3(decoder);
+	if (dec == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate decoder"); goto cleanup; }
+	ret = avcodec_parameters_to_context(dec, fmt->streams[audio_stream]->codecpar);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "copy decoder params", ret); goto cleanup; }
+	if (dec->ch_layout.nb_channels <= 0) {
+		av_channel_layout_default(&dec->ch_layout, 1);
+	}
+	ret = avcodec_open2(dec, decoder, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "open decoder", ret); goto cleanup; }
+
+	ret = swr_alloc_set_opts2(&swr, &mono, AV_SAMPLE_FMT_S16, target_rate, &dec->ch_layout, dec->sample_fmt, dec->sample_rate, 0, NULL);
+	if (ret < 0 || swr == NULL) { audiobook_set_av_error(errbuf, errbuf_size, "allocate resampler", ret); goto cleanup; }
+	ret = swr_init(swr);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "init resampler", ret); goto cleanup; }
+
+	pkt = av_packet_alloc();
+	frame = av_frame_alloc();
+	if (pkt == NULL || frame == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate packet/frame"); goto cleanup; }
+
+	while ((ret = av_read_frame(fmt, pkt)) >= 0) {
+		if (pkt->stream_index != audio_stream) {
+			av_packet_unref(pkt);
+			continue;
+		}
+		ret = avcodec_send_packet(dec, pkt);
+		av_packet_unref(pkt);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "send packet", ret); goto cleanup; }
+		while ((ret = avcodec_receive_frame(dec, frame)) >= 0) {
+			int out_samples = (int)av_rescale_rnd(swr_get_delay(swr, dec->sample_rate) + frame->nb_samples, target_rate, dec->sample_rate, AV_ROUND_UP);
+			uint8_t **converted = NULL;
+			ret = av_samples_alloc_array_and_samples(&converted, NULL, 1, out_samples, AV_SAMPLE_FMT_S16, 0);
+			if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "allocate converted samples", ret); goto cleanup; }
+			ret = swr_convert(swr, converted, out_samples, (const uint8_t **)frame->extended_data, frame->nb_samples);
+			if (ret < 0) {
+				av_freep(&converted[0]);
+				av_freep(&converted);
+				audiobook_set_av_error(errbuf, errbuf_size, "resample frame", ret);
+				goto cleanup;
+			}
+			int bytes = ret * 2;
+			ret = audiobook_write_pcm(out_file, converted[0], bytes, errbuf, errbuf_size);
+			av_freep(&converted[0]);
+			av_freep(&converted);
+			if (ret < 0) { goto cleanup; }
+			av_frame_unref(frame);
+		}
+		if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) { audiobook_set_av_error(errbuf, errbuf_size, "receive frame", ret); goto cleanup; }
+	}
+	if (ret == AVERROR_EOF) { ret = 0; }
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "read packet", ret); goto cleanup; }
+
+	ret = avcodec_send_packet(dec, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "flush decoder", ret); goto cleanup; }
+	while ((ret = avcodec_receive_frame(dec, frame)) >= 0) {
+		int out_samples = (int)av_rescale_rnd(swr_get_delay(swr, dec->sample_rate) + frame->nb_samples, target_rate, dec->sample_rate, AV_ROUND_UP);
+		uint8_t **converted = NULL;
+		ret = av_samples_alloc_array_and_samples(&converted, NULL, 1, out_samples, AV_SAMPLE_FMT_S16, 0);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "allocate flushed samples", ret); goto cleanup; }
+		ret = swr_convert(swr, converted, out_samples, (const uint8_t **)frame->extended_data, frame->nb_samples);
+		if (ret < 0) {
+			av_freep(&converted[0]);
+			av_freep(&converted);
+			audiobook_set_av_error(errbuf, errbuf_size, "resample flushed frame", ret);
+			goto cleanup;
+		}
+		int bytes = ret * 2;
+		ret = audiobook_write_pcm(out_file, converted[0], bytes, errbuf, errbuf_size);
+		av_freep(&converted[0]);
+		av_freep(&converted);
+		if (ret < 0) { goto cleanup; }
+		av_frame_unref(frame);
+	}
+	if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) { ret = 0; }
+
+cleanup:
+	if (out_file != NULL) {
+		if (fclose(out_file) != 0 && ret >= 0) {
+			ret = AVERROR(EIO);
+			audiobook_set_error(errbuf, errbuf_size, "close pcm output");
+		}
 	}
 	swr_free(&swr);
 	av_frame_free(&frame);
@@ -325,63 +453,286 @@ cleanup:
 	av_channel_layout_uninit(&mono);
 	return ret;
 }
+
+static int audiobook_encode_pcm_file_to_mp3(const char *in_path, const char *out_path, int sample_rate, int bitrate_kbps, char *errbuf, int errbuf_size) {
+	AVFormatContext *fmt = NULL;
+	AVCodecContext *enc = NULL;
+	AVStream *stream = NULL;
+	SwrContext *swr = NULL;
+	AVFrame *frame = NULL;
+	AVPacket *pkt = NULL;
+	FILE *in_file = NULL;
+	uint8_t *src_buf = NULL;
+	int ret = 0;
+	int64_t pts = 0;
+	AVChannelLayout mono;
+	av_channel_layout_default(&mono, 1);
+
+	av_log_set_level(AV_LOG_ERROR);
+	in_file = fopen(in_path, "rb");
+	if (in_file == NULL) { ret = AVERROR(EIO); audiobook_set_error(errbuf, errbuf_size, "open pcm input"); goto cleanup; }
+
+	const AVCodec *codec = avcodec_find_encoder_by_name("libmp3lame");
+	if (codec == NULL) {
+		codec = avcodec_find_encoder(AV_CODEC_ID_MP3);
+	}
+	if (codec == NULL) { ret = AVERROR_ENCODER_NOT_FOUND; audiobook_set_error(errbuf, errbuf_size, "mp3 encoder not found"); goto cleanup; }
+
+	ret = avformat_alloc_output_context2(&fmt, NULL, "mp3", out_path);
+	if (ret < 0 || fmt == NULL) { audiobook_set_av_error(errbuf, errbuf_size, "allocate output", ret); goto cleanup; }
+	stream = avformat_new_stream(fmt, NULL);
+	if (stream == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate output stream"); goto cleanup; }
+	enc = avcodec_alloc_context3(codec);
+	if (enc == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate encoder"); goto cleanup; }
+	enc->bit_rate = bitrate_kbps * 1000;
+	enc->sample_rate = sample_rate;
+	enc->sample_fmt = audiobook_pick_sample_fmt(codec);
+	ret = av_channel_layout_copy(&enc->ch_layout, &mono);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "copy channel layout", ret); goto cleanup; }
+	stream->time_base = (AVRational){1, sample_rate};
+	enc->time_base = stream->time_base;
+	if (fmt->oformat->flags & AVFMT_GLOBALHEADER) {
+		enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+	}
+	ret = avcodec_open2(enc, codec, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "open encoder", ret); goto cleanup; }
+	ret = avcodec_parameters_from_context(stream->codecpar, enc);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "copy encoder params", ret); goto cleanup; }
+	ret = avio_open(&fmt->pb, out_path, AVIO_FLAG_WRITE);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "open output", ret); goto cleanup; }
+	ret = avformat_write_header(fmt, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "write header", ret); goto cleanup; }
+
+	ret = swr_alloc_set_opts2(&swr, &enc->ch_layout, enc->sample_fmt, enc->sample_rate, &mono, AV_SAMPLE_FMT_S16, sample_rate, 0, NULL);
+	if (ret < 0 || swr == NULL) { audiobook_set_av_error(errbuf, errbuf_size, "allocate encoder resampler", ret); goto cleanup; }
+	ret = swr_init(swr);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "init encoder resampler", ret); goto cleanup; }
+
+	int frame_samples = enc->frame_size > 0 ? enc->frame_size : 1152;
+	src_buf = av_malloc(frame_samples * 2);
+	if (src_buf == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate pcm read buffer"); goto cleanup; }
+	while (1) {
+		size_t samples_read = fread(src_buf, 2, frame_samples, in_file);
+		if (samples_read == 0) {
+			if (ferror(in_file)) {
+				ret = AVERROR(EIO);
+				audiobook_set_error(errbuf, errbuf_size, "read pcm input");
+				goto cleanup;
+			}
+			break;
+		}
+		frame = av_frame_alloc();
+		if (frame == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate encode frame"); goto cleanup; }
+		frame->format = enc->sample_fmt;
+		frame->sample_rate = enc->sample_rate;
+		frame->nb_samples = (int)samples_read;
+		ret = av_channel_layout_copy(&frame->ch_layout, &enc->ch_layout);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "copy frame layout", ret); goto cleanup; }
+		ret = av_frame_get_buffer(frame, 0);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "allocate frame buffer", ret); goto cleanup; }
+		const uint8_t *src = src_buf;
+		ret = swr_convert(swr, frame->extended_data, (int)samples_read, &src, (int)samples_read);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "convert pcm for encoder", ret); goto cleanup; }
+		frame->nb_samples = ret;
+		frame->pts = pts;
+		pts += frame->nb_samples;
+		ret = avcodec_send_frame(enc, frame);
+		av_frame_free(&frame);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "send encode frame", ret); goto cleanup; }
+		while (1) {
+			pkt = av_packet_alloc();
+			if (pkt == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate packet"); goto cleanup; }
+			ret = avcodec_receive_packet(enc, pkt);
+			if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+				av_packet_free(&pkt);
+				ret = 0;
+				break;
+			}
+			if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "receive encoded packet", ret); goto cleanup; }
+			av_packet_rescale_ts(pkt, enc->time_base, stream->time_base);
+			pkt->stream_index = stream->index;
+			ret = av_interleaved_write_frame(fmt, pkt);
+			av_packet_free(&pkt);
+			if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "write encoded packet", ret); goto cleanup; }
+		}
+	}
+	ret = avcodec_send_frame(enc, NULL);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "flush encoder", ret); goto cleanup; }
+	while (1) {
+		pkt = av_packet_alloc();
+		if (pkt == NULL) { ret = AVERROR(ENOMEM); audiobook_set_error(errbuf, errbuf_size, "allocate flush packet"); goto cleanup; }
+		ret = avcodec_receive_packet(enc, pkt);
+		if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) {
+			av_packet_free(&pkt);
+			ret = 0;
+			break;
+		}
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "receive flush packet", ret); goto cleanup; }
+		av_packet_rescale_ts(pkt, enc->time_base, stream->time_base);
+		pkt->stream_index = stream->index;
+		ret = av_interleaved_write_frame(fmt, pkt);
+		av_packet_free(&pkt);
+		if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "write flush packet", ret); goto cleanup; }
+	}
+	ret = av_write_trailer(fmt);
+	if (ret < 0) { audiobook_set_av_error(errbuf, errbuf_size, "write trailer", ret); goto cleanup; }
+
+cleanup:
+	av_packet_free(&pkt);
+	av_frame_free(&frame);
+	if (src_buf != NULL) {
+		av_free(src_buf);
+	}
+	if (in_file != NULL) {
+		fclose(in_file);
+	}
+	swr_free(&swr);
+	avcodec_free_context(&enc);
+	if (fmt != NULL) {
+		if (fmt->pb != NULL) {
+			avio_closep(&fmt->pb);
+		}
+		avformat_free_context(fmt);
+	}
+	av_channel_layout_uninit(&mono);
+	return ret;
+}
 */
 import "C"
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"unsafe"
 )
 
 func decodeToPCM(e Encoder, input []byte) ([]byte, int, error) {
-	tmp, err := os.CreateTemp("", "audiobook-studio-*.audio")
+	tmp, err := os.CreateTemp("", "audiobook-studio-*.pcm")
 	if err != nil {
 		return nil, 0, err
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, 0, err
+	}
+	defer os.Remove(tmpName)
+
+	rate, err := decodeToPCMFile(e, input, tmpName)
+	if err != nil {
+		return nil, 0, err
+	}
+	pcm, err := os.ReadFile(tmpName)
+	if err != nil {
+		return nil, 0, err
+	}
+	return pcm, rate, nil
+}
+
+func decodeToPCMFile(e Encoder, input []byte, outputPath string) (int, error) {
+	tmp, err := os.CreateTemp("", "audiobook-studio-*.audio")
+	if err != nil {
+		return 0, err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(input); err != nil {
 		_ = tmp.Close()
-		return nil, 0, err
+		return 0, err
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 
 	cPath := C.CString(tmpName)
 	defer C.free(unsafe.Pointer(cPath))
+	cOutputPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cOutputPath))
 	errbuf := (*C.char)(C.calloc(1, 1024))
 	defer C.free(unsafe.Pointer(errbuf))
-	var out *C.uint8_t
-	var outLen C.int
-	if ret := C.audiobook_decode_file_to_pcm(cPath, &out, &outLen, C.int(sampleRate), errbuf, 1024); ret < 0 {
-		return nil, 0, fmt.Errorf("ffmpeg cgo decode failed: %s", C.GoString(errbuf))
+	if ret := C.audiobook_decode_file_to_pcm_file(cPath, cOutputPath, C.int(sampleRate), errbuf, 1024); ret < 0 {
+		return 0, fmt.Errorf("ffmpeg cgo decode failed: %s", C.GoString(errbuf))
 	}
-	defer C.av_free(unsafe.Pointer(out))
-	return C.GoBytes(unsafe.Pointer(out), outLen), sampleRate, nil
+	return sampleRate, nil
 }
 
 func mergeToMP3(e Encoder, segments [][]byte, outputPath string) error {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return err
 	}
-	var pcm bytes.Buffer
-	for _, segment := range segments {
-		pcm.Write(segment)
+	tmpName, err := writeSegmentsToTemp(segments, filepath.Dir(outputPath))
+	if err != nil {
+		return err
 	}
-	data := pcm.Bytes()
-	if len(data) == 0 {
-		return fmt.Errorf("no pcm data to encode")
+	defer os.Remove(tmpName)
+
+	return encodePCMFileToMP3(e, tmpName, outputPath)
+}
+
+func mergePCMFilesToMP3(e Encoder, segmentPaths []string, outputPath string) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return err
 	}
-	cPath := C.CString(outputPath)
-	defer C.free(unsafe.Pointer(cPath))
+	tmp, err := os.CreateTemp(filepath.Dir(outputPath), ".audiobook-studio-*.pcm")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	for _, path := range segmentPaths {
+		if err := copyFileToWriter(path, tmp); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	return encodePCMFileToMP3(e, tmpName, outputPath)
+}
+
+func encodePCMFileToMP3(e Encoder, inputPath string, outputPath string) error {
+	cInputPath := C.CString(inputPath)
+	defer C.free(unsafe.Pointer(cInputPath))
+	cOutputPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cOutputPath))
 	errbuf := (*C.char)(C.calloc(1, 1024))
 	defer C.free(unsafe.Pointer(errbuf))
-	if ret := C.audiobook_encode_pcm_to_mp3(cPath, (*C.uint8_t)(unsafe.Pointer(&data[0])), C.int(len(data)), C.int(sampleRate), C.int(e.OutputBitrateKB), errbuf, 1024); ret < 0 {
+	if ret := C.audiobook_encode_pcm_file_to_mp3(cInputPath, cOutputPath, C.int(sampleRate), C.int(e.OutputBitrateKB), errbuf, 1024); ret < 0 {
 		return fmt.Errorf("ffmpeg cgo encode failed: %s", C.GoString(errbuf))
 	}
 	return nil
+}
+
+func writeSegmentsToTemp(segments [][]byte, dir string) (string, error) {
+	tmp, err := os.CreateTemp(dir, ".audiobook-studio-*.pcm")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	for _, segment := range segments {
+		if _, err := tmp.Write(segment); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return "", err
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", err
+	}
+	return tmpName, nil
+}
+
+func copyFileToWriter(path string, w io.Writer) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(w, file)
+	return err
 }

@@ -33,12 +33,18 @@ type fakeEncoder struct {
 	output string
 }
 
-func (f *fakeEncoder) DecodeToPCM(input []byte) ([]byte, int, error) {
-	return append([]byte("pcm:"), input...), 24000, nil
+func (f *fakeEncoder) DecodeToPCMFile(input []byte, outputPath string) (int, error) {
+	return 24000, os.WriteFile(outputPath, append([]byte("pcm:"), input...), 0644)
 }
 
-func (f *fakeEncoder) MergeToMP3(segments [][]byte, outputPath string) error {
-	f.merged = append(f.merged, segments...)
+func (f *fakeEncoder) MergePCMFilesToMP3(segmentPaths []string, outputPath string) error {
+	for _, path := range segmentPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		f.merged = append(f.merged, data)
+	}
 	f.output = outputPath
 	return os.WriteFile(outputPath, []byte("mp3"), 0644)
 }

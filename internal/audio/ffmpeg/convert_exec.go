@@ -16,6 +16,7 @@ package ffmpeg
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,20 +36,88 @@ func decodeToPCM(e Encoder, input []byte) ([]byte, int, error) {
 	return out.Bytes(), sampleRate, nil
 }
 
-func mergeToMP3(e Encoder, segments [][]byte, outputPath string) error {
-	var pcm bytes.Buffer
-	for _, segment := range segments {
-		pcm.Write(segment)
+func decodeToPCMFile(e Encoder, input []byte, outputPath string) (int, error) {
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return 0, err
 	}
+	defer out.Close()
+
+	cmd := exec.Command(e.Path, "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", strconv.Itoa(sampleRate), "pipe:1")
+	cmd.Stdin = bytes.NewReader(input)
+	cmd.Stdout = out
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("ffmpeg decode failed: %w: %s", err, stderr.String())
+	}
+	return sampleRate, nil
+}
+
+func mergeToMP3(e Encoder, segments [][]byte, outputPath string) error {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return err
 	}
+	pr, pw := io.Pipe()
+	copyErr := make(chan error, 1)
+	go func() {
+		var err error
+		for _, segment := range segments {
+			if _, err = pw.Write(segment); err != nil {
+				break
+			}
+		}
+		copyErr <- err
+		_ = pw.CloseWithError(err)
+	}()
+	err := encodePCMReaderToMP3(e, pr, outputPath)
+	if pipeErr := <-copyErr; err == nil && pipeErr != nil {
+		err = pipeErr
+	}
+	return err
+}
+
+func mergePCMFilesToMP3(e Encoder, segmentPaths []string, outputPath string) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	copyErr := make(chan error, 1)
+	go func() {
+		var err error
+		for _, path := range segmentPaths {
+			err = copyFileToWriter(path, pw)
+			if err != nil {
+				break
+			}
+		}
+		copyErr <- err
+		_ = pw.CloseWithError(err)
+	}()
+	err := encodePCMReaderToMP3(e, pr, outputPath)
+	if pipeErr := <-copyErr; err == nil && pipeErr != nil {
+		err = pipeErr
+	}
+	return err
+}
+
+func encodePCMReaderToMP3(e Encoder, input io.Reader, outputPath string) error {
 	cmd := exec.Command(e.Path, "-hide_banner", "-loglevel", "error", "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", strconv.Itoa(sampleRate), "-i", "pipe:0", "-codec:a", "libmp3lame", "-b:a", fmt.Sprintf("%dk", e.OutputBitrateKB), "-y", outputPath)
-	cmd.Stdin = bytes.NewReader(pcm.Bytes())
+	cmd.Stdin = input
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ffmpeg encode failed: %w: %s", err, stderr.String())
 	}
 	return nil
+}
+
+func copyFileToWriter(path string, w io.Writer) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(w, file)
+	return err
 }

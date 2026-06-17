@@ -11,7 +11,11 @@
 
 package ffmpeg
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
 
 const sampleRate = 24000
 
@@ -52,6 +56,36 @@ func (e Encoder) DecodeToPCM(input []byte) ([]byte, int, error) {
 	return nil, 0, err
 }
 
+// DecodeToPCMFile decodes arbitrary audio bytes into a mono s16le PCM file at a stable sample rate.
+func DecodeToPCMFile(input []byte, outputPath string) (int, error) {
+	return New("", 0).DecodeToPCMFile(input, outputPath)
+}
+
+// DecodeToPCMFile decodes arbitrary audio bytes into a mono s16le PCM file at a stable sample rate.
+func (e Encoder) DecodeToPCMFile(input []byte, outputPath string) (int, error) {
+	if len(input) == 0 {
+		return 0, fmt.Errorf("input audio is empty")
+	}
+	if outputPath == "" {
+		return 0, fmt.Errorf("output path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return 0, err
+	}
+	rate, err := decodeToPCMFile(e, input, outputPath)
+	if err == nil {
+		return rate, nil
+	}
+	if rawErr := validateRawPCM(input); rawErr == nil {
+		if err := os.WriteFile(outputPath, input, 0644); err != nil {
+			return 0, err
+		}
+		return sampleRate, nil
+	}
+	_ = os.Remove(outputPath)
+	return 0, err
+}
+
 // MergeToMP3 concatenates PCM segments and writes a single MP3.
 func MergeToMP3(segments [][]byte, outputPath string) error {
 	return New("", 0).MergeToMP3(segments, outputPath)
@@ -73,9 +107,44 @@ func (e Encoder) MergeToMP3(segments [][]byte, outputPath string) error {
 	return mergeToMP3(e, segments, outputPath)
 }
 
+// MergePCMFilesToMP3 concatenates PCM files and writes a single MP3.
+func MergePCMFilesToMP3(segmentPaths []string, outputPath string) error {
+	return New("", 0).MergePCMFilesToMP3(segmentPaths, outputPath)
+}
+
+// MergePCMFilesToMP3 concatenates PCM files and writes a single MP3.
+func (e Encoder) MergePCMFilesToMP3(segmentPaths []string, outputPath string) error {
+	if len(segmentPaths) == 0 {
+		return fmt.Errorf("no audio segments to merge")
+	}
+	if outputPath == "" {
+		return fmt.Errorf("output path is empty")
+	}
+	for i, path := range segmentPaths {
+		if path == "" {
+			return fmt.Errorf("segment %d path is empty", i)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("segment %d: %w", i, err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("segment %d is empty", i)
+		}
+	}
+	return mergePCMFilesToMP3(e, segmentPaths, outputPath)
+}
+
 func rawPCM(input []byte) ([]byte, error) {
-	if len(input) < 2 || len(input)%2 != 0 {
-		return nil, fmt.Errorf("input is not valid s16le pcm")
+	if err := validateRawPCM(input); err != nil {
+		return nil, err
 	}
 	return append([]byte(nil), input...), nil
+}
+
+func validateRawPCM(input []byte) error {
+	if len(input) < 2 || len(input)%2 != 0 {
+		return fmt.Errorf("input is not valid s16le pcm")
+	}
+	return nil
 }

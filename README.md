@@ -5,29 +5,8 @@ Audiobook-Studio converts `.txt` files into MP3 audiobooks with an OpenAI-compat
 ## Current Implementation
 
 - Go core packages for config, text splitting, TTS requests, ffmpeg decoding/merging, and batch orchestration.
-- CLI entrypoint for file or directory conversion.
-- Wails v2 GUI scaffold with config, batch, pause/resume/cancel, single-text conversion bindings, and a dark static frontend.
+- Wails v2 GUI app with config, batch, pause/resume/cancel, single-text conversion bindings, and a dark static frontend.
 - Unit tests for config, splitter, TTS, batch, and ffmpeg integration.
-
-## CLI Usage
-
-Create a default config:
-
-```sh
-go run .
-```
-
-Convert one file:
-
-```sh
-go run . -input ./book.txt -token "$OPENAI_API_KEY"
-```
-
-Convert a directory of `.txt` files:
-
-```sh
-go run . -input ./texts -output-dir ./output -concurrency 2
-```
 
 ## Config
 
@@ -42,11 +21,11 @@ The default `config.json` includes:
 - `CONCURRENCY`: parallel TTS requests per file.
 - `REQUEST_TIMEOUT`: TTS request timeout in seconds.
 - `OUTPUT_BITRATE_KB`: MP3 output bitrate in kbps.
-- `FFMPEG_PATH`: ffmpeg executable for CLI or non-CGO fallback builds. GitHub Actions GUI builds use the bundled static FFmpeg libraries.
+- `FFMPEG_PATH`: ffmpeg executable for local fallback builds. GitHub Actions GUI builds use the bundled static FFmpeg libraries.
 
 ## GUI
 
-The GUI lives in `GUI/` and follows Wails v2 conventions.
+The application lives in `GUI/` and follows Wails v2 conventions.
 
 ```sh
 cd GUI
